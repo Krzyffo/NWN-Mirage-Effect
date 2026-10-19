@@ -12,6 +12,7 @@
 //   scriptableFloat3  distance where it reaches full strength; the
 //                     mirage "water" lies beyond this
 //   scriptableFloat4  mirage water (sky reflected below the horizon), 0..1
+//   scriptableFloat5  blur of the hot, distant air, 0..1
 //   scriptableInt1    1 = debug view: red = shimmer, blue = mirage water
 
 #define SHADER_TYPE 2
@@ -20,6 +21,7 @@
 #include "inc_scriptable"
 
 #define MIRAGE_PIXELS     3.0     // largest ripple, in pixels at 1080p
+#define MIRAGE_BLUR_PIXELS 3.0    // blur radius at full strength, in pixels at 1080p
 #define MIRAGE_BAND_DEG   6.0     // the water band reaches this far below the horizon
 #define MIRAGE_TWO_PI     6.2831853
 #define MIRAGE_PERIOD_MS  100000  // time wraps every 100 s; the waves below repeat in it
@@ -40,6 +42,36 @@ float MirageIsSky(float fDepth)
     return step(farClip * 0.95, fDepth);
 }
 
+// Pixels at 1080p to texture coordinates, so the effect looks the same at
+// any resolution.
+vec2 MiragePixels(vec2 vPx)
+{
+    return vec2(vPx.x / fAspectRatio, vPx.y) / 1080.0;
+}
+
+// Soft, slightly wide blur of the scene around uvCenter: hot air smears
+// sideways more than up and down. Taps that land on something nearer than
+// fNear are skipped, so close objects never bleed into the haze.
+vec4 MirageBlur(vec2 uvCenter, float fRadiusPx, float fNear)
+{
+    vec4 cSum = texture2D(texFBColor, uvCenter);
+    if (fRadiusPx < 0.25) return cSum;
+    float fWeights = 1.0;
+    for (int i = 0; i < 12; i++)
+    {
+        float fAngle = float(i) * 0.5235988 + 0.2617994;   // 30 degrees apart
+        float fRing = mod(float(i), 2.0) < 0.5 ? 1.0 : 0.5;
+        vec2 uvTap = uvCenter + MiragePixels(vec2(cos(fAngle), sin(fAngle) * 0.6) * fRing * fRadiusPx);
+        if (GetDepth(uvTap) >= fNear)
+        {
+            float fWeight = 1.5 - fRing;  // inner ring counts more
+            cSum += texture2D(texFBColor, uvTap) * fWeight;
+            fWeights += fWeight;
+        }
+    }
+    return cSum / fWeights;
+}
+
 void main()
 {
     vec4 Color = FS_PostProcess();
@@ -54,6 +86,7 @@ void main()
     float fNear = max(scriptableFloat2, 0.0);
     float fFar  = max(scriptableFloat3, fNear + 1.0);
     float fWater = clamp(scriptableFloat4, 0.0, 1.0);
+    float fBlur = clamp(scriptableFloat5, 0.0, 1.0);
 
     vec2 uv = vVertexTexCoords;
     float t = float(worldtimerTimeOfDay - (worldtimerTimeOfDay / MIRAGE_PERIOD_MS) * MIRAGE_PERIOD_MS) / 1000.0;
@@ -72,13 +105,14 @@ void main()
     float fBand = 1.0 - smoothstep(0.0, radians(25.0), abs(fElevation));
     float fShimmer = fStrength * fFade * fBand;
 
-    vec2 vOffset = MirageRipple(uv, t) * MIRAGE_PIXELS * fShimmer / 1080.0;
+    vec2 vOffset = MiragePixels(MirageRipple(uv, t) * MIRAGE_PIXELS * fShimmer);
     vec2 uvRipple = uv + vOffset;
     // Never pull a nearby object's pixels into the haze behind it.
     if (GetDepth(uvRipple) < fNear) uvRipple = uv;
 
     vec4 cPlain = texture2D(texFBColor, uv);
-    vec4 cMirage = texture2D(texFBColor, uvRipple);
+    float fBlurPx = MIRAGE_BLUR_PIXELS * fBlur * fShimmer;
+    vec4 cMirage = MirageBlur(uvRipple, fBlurPx, fNear);
 
     // Mirage water: far ground just below the horizon shows the sky above
     // it, mirrored and rippling, like a lake that is not there.
@@ -99,7 +133,8 @@ void main()
                   * smoothstep(fNear, fFar, fDepth)
                   * (1.0 - smoothstep(0.0, radians(MIRAGE_BAND_DEG), fBelow));
             // The reflection is a little paler than the sky, like haze.
-            vec4 cSkyMirror = texture2D(texFBColor, uvMirror);
+            // Blurred more than the shimmer: the "water" is never sharp.
+            vec4 cSkyMirror = MirageBlur(uvMirror, MIRAGE_BLUR_PIXELS * (0.5 + fBlur), fNear);
             cMirage = mix(cMirage, mix(cSkyMirror, vec4(1.0), 0.15), fPool);
         }
     }

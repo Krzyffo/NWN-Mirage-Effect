@@ -3,6 +3,7 @@
 //   /mirage 0.7      force a strength everywhere (0.1..1)
 //   /mirage off      force it off
 //   /mirage area     back to the area's own settings
+//   /mirage blur 0.8 force the blur (0..1), /mirage blur area to undo
 //   /mirage debug    toggle the debug view (red = shimmer, blue = water)
 // If the module already has an OnPlayerChat script, add this line to it:
 //     ExecuteScript("mirage_chat", OBJECT_SELF);
@@ -24,6 +25,27 @@ void main()
         int bDebug = !GetLocalInt(oPC, MIRAGE_VAR_DEBUG);
         SetLocalInt(oPC, MIRAGE_VAR_DEBUG, bDebug);
         SendMessageToPC(oPC, "Mirage debug view " + (bDebug ? "on: red = shimmer, blue = mirage water." : "off."));
+    }
+    else if (GetStringLeft(sArg, 4) == "blur")
+    {
+        string sVal = GetStringRight(sArg, GetStringLength(sArg) - 4);
+        while (GetStringLeft(sVal, 1) == " ") sVal = GetStringRight(sVal, GetStringLength(sVal) - 1);
+        if (sVal == "area" || sVal == "")
+        {
+            DeleteLocalFloat(oPC, MIRAGE_VAR_FORCE_BLUR);
+            SendMessageToPC(oPC, "Mirage blur follows the area settings again.");
+        }
+        else
+        {
+            float f = StringToFloat(sVal);
+            if (f < 0.0 || f > 1.0)
+            {
+                SendMessageToPC(oPC, "Use a blur from 0 to 1, or /mirage blur area.");
+                return;
+            }
+            SetLocalFloat(oPC, MIRAGE_VAR_FORCE_BLUR, f == 0.0 ? -1.0 : f);
+            SendMessageToPC(oPC, "Mirage blur forced to " + FloatToString(f, 0, 2) + ". /mirage blur area to undo.");
+        }
     }
     else if (sArg == "off")
     {

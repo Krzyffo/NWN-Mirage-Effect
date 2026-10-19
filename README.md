@@ -3,6 +3,7 @@
 Desert heat haze and mirages for Neverwinter Nights: Enhanced Edition.
 
 - **Shimmer:** distant ground and the horizon ripple like hot air. The effect grows with distance, so nearby things stay sharp.
+- **Blur:** the hot distant air goes soft as well as rippling. The mirage water is blurred most.
 - **Mirage water:** far ground just below the horizon mirrors the sky, like a lake that isn't there.
 - **Follows the sun:** none at night, building up through the morning, strongest from 11:00 to 16:00.
 - **Per area:** set by area variables. Interiors never get it.
@@ -25,6 +26,7 @@ It's a full-screen shader (`src/shaders/fsfbpostpr.shd`) that replaces the game'
 | `MIRAGE_NEAR` | float | 10 | Metres where the shimmer starts |
 | `MIRAGE_FAR` | float | 40 | Metres where it is full strength; the mirage water lies beyond |
 | `MIRAGE_WATER` | float | 0.6 | Mirage water strength 0-1 |
+| `MIRAGE_BLUR` | float | 0.5 | Blur of the distant air 0-1; -1 = none (0 reads the same as unset) |
 | `MIRAGE_ALLDAY` | int | 0 | 1 = ignore the time of day |
 
 6. Build Module and save.
@@ -39,6 +41,7 @@ Chat commands (with `mirage_chat` set up):
 | `/mirage 0.7` | Force a strength everywhere, any time of day |
 | `/mirage off` | Force it off |
 | `/mirage area` | Back to the area's own settings |
+| `/mirage blur 0.8` | Force the blur (0-1); `/mirage blur area` to undo |
 | `/mirage debug` | Debug view: red = shimmer, blue = mirage water |
 
 Look out across a large open area. The effect is about distance, so it needs a view of 40 m or more.
