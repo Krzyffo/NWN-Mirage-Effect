@@ -1,0 +1,118 @@
+// NWN-Mirage: desert heat haze and mirage over the final image.
+//
+// Replaces the stock fsfbpostpr (the full-screen post-processing pass).
+// The stock pass runs unchanged first, so sharpen, depth of field,
+// vibrance, gamma and so on still work; the mirage is added on top as the
+// difference between a rippled and a plain sample of the scene.
+//
+// Off (no change at all) until a script sets scriptableFloat1 above 0,
+// see src/nss/mirage_inc.nss:
+//   scriptableFloat1  strength, 0..1
+//   scriptableFloat2  distance in metres where the shimmer starts
+//   scriptableFloat3  distance where it reaches full strength; the
+//                     mirage "water" lies beyond this
+//   scriptableFloat4  mirage water (sky reflected below the horizon), 0..1
+//   scriptableInt1    1 = debug view: red = shimmer, blue = mirage water
+
+#define SHADER_TYPE 2
+
+#include "inc_postpr"
+#include "inc_scriptable"
+
+#define MIRAGE_PIXELS     3.0     // largest ripple, in pixels at 1080p
+#define MIRAGE_BAND_DEG   6.0     // the water band reaches this far below the horizon
+#define MIRAGE_TWO_PI     6.2831853
+#define MIRAGE_PERIOD_MS  100000  // time wraps every 100 s; the waves below repeat in it
+
+// Rising heat: horizontal ripples drifting upward, two layers. Frequencies
+// are whole multiples of 2*pi/100 s, so the wrap of the clock is seamless.
+vec2 MirageRipple(vec2 uv, float t)
+{
+    float w = MIRAGE_TWO_PI / 100.0;
+    float y = uv.y * 1080.0;
+    float a = sin(y * 0.11 - t * w * 64.0 + sin(uv.x * 9.0 + t * w * 16.0) * 1.5);
+    float b = sin(y * 0.37 - t * w * 116.0 + uv.x * 23.0);
+    return vec2(a * 0.7 + b * 0.3, (b - a) * 0.2);
+}
+
+float MirageIsSky(float fDepth)
+{
+    return step(farClip * 0.95, fDepth);
+}
+
+void main()
+{
+    vec4 Color = FS_PostProcess();
+
+    float fStrength = clamp(scriptableFloat1, 0.0, 1.0);
+    if (fStrength <= 0.0)
+    {
+        gl_FragColor = Color;
+        return;
+    }
+
+    float fNear = max(scriptableFloat2, 0.0);
+    float fFar  = max(scriptableFloat3, fNear + 1.0);
+    float fWater = clamp(scriptableFloat4, 0.0, 1.0);
+
+    vec2 uv = vVertexTexCoords;
+    float t = float(worldtimerTimeOfDay - (worldtimerTimeOfDay / MIRAGE_PERIOD_MS) * MIRAGE_PERIOD_MS) / 1000.0;
+    float fDepth = GetDepth(uv);
+    float fSky = MirageIsSky(fDepth);
+
+    // Where the horizon is: cameraPitch is 90 when looking level, less
+    // when looking down. Elevation of this pixel above the horizon, radians.
+    float fTilt = radians(90.0 - cameraPitch);
+    float fPixelAngle = atan((uv.y * 2.0 - 1.0) * fNDCToView);
+    float fElevation = fPixelAngle - fTilt;
+
+    // Shimmer: grows with distance, strongest near the horizon (heat rises
+    // off the ground, so the sky high up stays still).
+    float fFade = fSky > 0.5 ? 1.0 : smoothstep(fNear, fFar, fDepth);
+    float fBand = 1.0 - smoothstep(0.0, radians(25.0), abs(fElevation));
+    float fShimmer = fStrength * fFade * fBand;
+
+    vec2 vOffset = MirageRipple(uv, t) * MIRAGE_PIXELS * fShimmer / 1080.0;
+    vec2 uvRipple = uv + vOffset;
+    // Never pull a nearby object's pixels into the haze behind it.
+    if (GetDepth(uvRipple) < fNear) uvRipple = uv;
+
+    vec4 cPlain = texture2D(texFBColor, uv);
+    vec4 cMirage = texture2D(texFBColor, uvRipple);
+
+    // Mirage water: far ground just below the horizon shows the sky above
+    // it, mirrored and rippling, like a lake that is not there.
+    float fBelow = -fElevation;
+    float fPool = 0.0;
+    if (fWater > 0.0 && fBelow > 0.0 && fSky < 0.5)
+    {
+        // This pixel looks fBelow under the horizon; its mirror image
+        // looks as far above it, i.e. at view angle (fBelow + tilt).
+        float fMirrorAngle = fBelow + fTilt;
+        float fMirrorY = tan(fMirrorAngle) / fNDCToView * 0.5 + 0.5;
+        vec2 uvMirror = vec2(uv.x, fMirrorY) + vOffset * 2.5;
+        if (uvMirror.y < 1.0)
+        {
+            float fMirrorDepth = GetDepth(uvMirror);
+            float fReflects = max(MirageIsSky(fMirrorDepth), smoothstep(fFar, fFar * 2.0, fMirrorDepth));
+            fPool = fWater * fStrength * fReflects
+                  * smoothstep(fNear, fFar, fDepth)
+                  * (1.0 - smoothstep(0.0, radians(MIRAGE_BAND_DEG), fBelow));
+            // The reflection is a little paler than the sky, like haze.
+            vec4 cSkyMirror = texture2D(texFBColor, uvMirror);
+            cMirage = mix(cMirage, mix(cSkyMirror, vec4(1.0), 0.15), fPool);
+        }
+    }
+
+    // Add only the change, run through the same tonemap as the stock pass.
+    vec3 a = cMirage.rgb;
+    vec3 b = cPlain.rgb;
+    ApplyColorTonemap(a);
+    ApplyColorTonemap(b);
+    Color.rgb += a - b;
+
+    if (scriptableInt1 == 1)
+        Color.rgb = mix(Color.rgb, vec3(1.0, 0.0, 0.0), fShimmer * 0.6) + vec3(0.0, 0.0, fPool);
+
+    gl_FragColor = Color;
+}
