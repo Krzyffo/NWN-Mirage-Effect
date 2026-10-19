@@ -1,7 +1,9 @@
 *.ncs
 *.ndb
-build/
 __pycache__/
 tools/neverwinter/
+# Build output, written next to tools/build.py.
+tools/nwn_mirage.erf
+tools/nwn_mirage.hak
 # Beamdog shader sources, extracted for study; not ours to publish.
 reference/

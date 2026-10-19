@@ -12,9 +12,9 @@ It's a full-screen shader (`src/shaders/fsfbpostpr.shd`) that replaces the game'
 
 ## Setup in a module
 
-1. Build: `py tools/build.py`. This writes `build/nwn_mirage.erf` (scripts) and `build/nwn_mirage.hak` (shader) and copies the hak into your NWN `hak` folder.
-2. In the toolset, add the hak: Module Properties > Custom Content > add `nwn_mirage`.
-3. Import the scripts: File > Import > `build/nwn_mirage.erf`.
+1. Get the two files: download `nwn_mirage.hak` and `nwn_mirage.erf` from the [latest release](https://github.com/Krzyffo/NWN-Mirage-Effect/releases/latest), or build them yourself (see [Building](#building)).
+2. Copy `nwn_mirage.hak` into your NWN `hak` folder (normally `Documents\Neverwinter Nights\hak`). Then in the toolset, add it: Module Properties > Custom Content > add `nwn_mirage`.
+3. Import the scripts: File > Import > `nwn_mirage.erf`.
 4. Module Properties > Events:
    - **OnClientEnter:** `mirage_enter`. If the module already has a script there, add `ExecuteScript("mirage_enter", GetEnteringObject());` to it instead.
    - **OnPlayerChat** (optional, for testing): `mirage_chat`. If the module already has a script there, add `ExecuteScript("mirage_chat", OBJECT_SELF);` to it instead.
@@ -48,9 +48,30 @@ Look out across a large open area. The effect is about distance, so it needs a v
 
 If nothing changes at all, the game probably isn't running the post-processing pass. Turn on any post-processing effect in Options > Graphics (for example Vibrance or Sharpen) and try again. If the screen goes black or looks broken, the shader failed to compile on your graphics card: the error is in `nwclientLog1.txt` in your NWN user folder (the `logs` folder).
 
+## Building
+
+1. Unzip the [neverwinter.nim](https://github.com/niv/neverwinter.nim/releases) release for your system into `tools/neverwinter/`. The script compiler comes from it.
+2. Run:
+
+   ```bash
+   py tools/build.py
+   ```
+
+   It writes `nwn_mirage.erf` and `nwn_mirage.hak` next to the script, in `tools/`. Copy the hak to your `hak` folder yourself; the build doesn't install anything.
+
+The compiler needs your game's install folder. The build finds it in your Steam libraries. For a GOG or Beamdog copy, or if detection fails, name the folder that contains `data`:
+
+```bash
+py tools/build.py --nwn-root "C:\path\to\Neverwinter Nights"
+```
+
+Setting the `NWN_ROOT` environment variable to that folder works too.
+
+To see what's inside a built file, run `py tools/build.py --list tools/nwn_mirage.hak`.
+
 ## Repository
 
 - `src/shaders/`: the shader, packed into the hak.
 - `src/nss/`: the control scripts: `mirage_inc` (area settings → shader), `mirage_enter` and `mirage_loop` (per-player update every 2 s), `mirage_chat` (test commands).
-- `tools/build.py`: compiles, packs and installs. The compiler comes from the [neverwinter.nim](https://github.com/niv/neverwinter.nim/releases) release, unzipped into `tools/neverwinter/`.
+- `tools/build.py`: compiles the scripts and packs `nwn_mirage.erf` and `nwn_mirage.hak` next to itself (see [Building](#building)).
 - `reference/` (not committed): Beamdog's stock shaders, extracted from the game for study.
