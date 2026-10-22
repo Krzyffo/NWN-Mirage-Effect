@@ -23,6 +23,7 @@
 #define MIRAGE_PIXELS     3.0     // largest ripple, in pixels at 1080p
 #define MIRAGE_BLUR_PIXELS 3.0    // blur radius at full strength, in pixels at 1080p
 #define MIRAGE_BAND_DEG   6.0     // the water band reaches this far below the horizon
+#define MIRAGE_CLEAR_PIXELS 32.0  // the water mirrors nothing this close to a near object, in pixels at 1080p
 #define MIRAGE_TWO_PI     6.2831853
 #define MIRAGE_PERIOD_MS  100000  // time wraps every 100 s; the waves below repeat in it
 
@@ -49,27 +50,133 @@ vec2 MiragePixels(vec2 vPx)
     return vec2(vPx.x / fAspectRatio, vPx.y) / 1080.0;
 }
 
-// Soft, slightly wide blur of the scene around uvCenter: hot air smears
-// sideways more than up and down. Taps that land on something nearer than
-// fNear are skipped, so close objects never bleed into the haze.
-vec4 MirageBlur(vec2 uvCenter, float fRadiusPx, float fNear)
+// Offset of blur tap i (0..11) around the centre, in 1080p pixels: hot air
+// smears sideways more than up and down. Returns the tap's weight in z.
+vec3 MirageTap(int i, float fRadiusPx)
+{
+    float fAngle = float(i) * 0.5235988 + 0.2617994;   // 30 degrees apart
+    float fRing = mod(float(i), 2.0) < 0.5 ? 1.0 : 0.5;
+    return vec3(vec2(cos(fAngle), sin(fAngle) * 0.6) * fRing * fRadiusPx, 1.5 - fRing);  // inner ring counts more
+}
+
+// Soft, slightly wide blur of the scene around uvCenter. Taps that land on
+// something nearer than fMinDepth are skipped, so close objects never bleed
+// into the haze.
+vec4 MirageBlur(vec2 uvCenter, float fRadiusPx, float fMinDepth)
 {
     vec4 cSum = texture2D(texFBColor, uvCenter);
     if (fRadiusPx < 0.25) return cSum;
     float fWeights = 1.0;
     for (int i = 0; i < 12; i++)
     {
-        float fAngle = float(i) * 0.5235988 + 0.2617994;   // 30 degrees apart
-        float fRing = mod(float(i), 2.0) < 0.5 ? 1.0 : 0.5;
-        vec2 uvTap = uvCenter + MiragePixels(vec2(cos(fAngle), sin(fAngle) * 0.6) * fRing * fRadiusPx);
-        if (GetDepth(uvTap) >= fNear)
+        vec3 vTap = MirageTap(i, fRadiusPx);
+        vec2 uvTap = uvCenter + MiragePixels(vTap.xy);
+        if (GetDepth(uvTap) >= fMinDepth)
         {
-            float fWeight = 1.5 - fRing;  // inner ring counts more
-            cSum += texture2D(texFBColor, uvTap) * fWeight;
-            fWeights += fWeight;
+            cSum += texture2D(texFBColor, uvTap) * vTap.z;
+            fWeights += vTap.z;
         }
     }
     return cSum / fWeights;
+}
+
+// How much a point at this depth may be mirrored: sky and ground well
+// beyond fFar fully, anything nearer not at all, with a soft ramp between.
+float MirageMirrorable(float fDepth, float fFar)
+{
+    return max(MirageIsSky(fDepth), smoothstep(fFar, fFar * 2.0, fDepth));
+}
+
+// Blur for the mirage water. Every tap, the centre too, is weighted by how
+// far away it is, so the player, held weapons and anything else close never
+// get a mirrored copy. fCoverage says how much of the blur was far content:
+// 1 = all of it, 0 = none; the caller fades the water by it, so the mirror
+// thins out smoothly next to near objects instead of cutting off.
+vec4 MirageMirrorBlur(vec2 uvCenter, float fRadiusPx, float fFar, out float fCoverage)
+{
+    float fW = MirageMirrorable(GetDepth(uvCenter), fFar);
+    vec4 cSum = texture2D(texFBColor, uvCenter) * fW;
+    float fWeights = fW;
+    float fTotal = 1.0;
+    for (int i = 0; i < 12; i++)
+    {
+        vec3 vTap = MirageTap(i, fRadiusPx);
+        vec2 uvTap = uvCenter + MiragePixels(vTap.xy);
+        fW = MirageMirrorable(GetDepth(uvTap), fFar) * vTap.z;
+        cSum += texture2D(texFBColor, uvTap) * fW;
+        fWeights += fW;
+        fTotal += vTap.z;
+    }
+    fCoverage = fWeights / fTotal;
+    return fWeights > 0.001 ? cSum / fWeights : vec4(0.0);
+}
+
+// 0..1: how much something near the camera lies within MIRAGE_CLEAR_PIXELS
+// of uvCenter, checked along a vertical and a horizontal line of taps 2 px
+// apart, so even a 1 px spear shaft at any angle is found. Glow and fire
+// effects on weapons write no depth; keeping clear of the weapon itself
+// keeps them out of the mirror too.
+float MirageNearAround(vec2 uvCenter, float fFar)
+{
+    float fNearest = 0.0;
+    for (int i = 0; i < 33; i++)
+    {
+        float fPx = float(i - 16) * (MIRAGE_CLEAR_PIXELS / 16.0);
+        fNearest = max(fNearest, 1.0 - MirageMirrorable(GetDepth(uvCenter + MiragePixels(vec2(0.0, fPx))), fFar));
+        fNearest = max(fNearest, 1.0 - MirageMirrorable(GetDepth(uvCenter + MiragePixels(vec2(fPx, 0.0))), fFar));
+    }
+    return fNearest;
+}
+
+float MirageLum(vec4 c)
+{
+    return dot(c.rgb, vec3(0.299, 0.587, 0.114));
+}
+
+// Whether the far content at uvTap is clear of near objects just above and
+// below it, 0..1.
+float MirageClearColumn(vec2 uvTap, float fFar)
+{
+    float fW = 1.0;
+    for (int k = 0; k < 5; k++)
+        fW *= MirageMirrorable(GetDepth(uvTap + MiragePixels(vec2(0.0, float(k - 2) * 6.0))), fFar);
+    return fW;
+}
+
+// The colour of the sky and far haze at height fY, from eight columns spread
+// across the whole screen. Stands in for whatever a near object hides, and
+// tells weapon glow and fire apart from the sky: those write no depth, so
+// only their brightness gives them away. Columns much brighter than the rest
+// count less, so a glow caught by one column does not tint the row. The
+// result is the same across the row, so it never draws lines or shapes.
+// fFound is how much clear sky was found, 0..1.
+vec4 MirageRowSky(float fY, float fFar, out float fFound)
+{
+    float fLumSum = 0.0;
+    float fClearSum = 0.0;
+    for (int i = 0; i < 8; i++)
+    {
+        vec2 uvTap = vec2((float(i) + 0.5) / 8.0, fY);
+        float fW = MirageClearColumn(uvTap, fFar);
+        fLumSum += MirageLum(texture2D(texFBColor, uvTap)) * fW;
+        fClearSum += fW;
+    }
+    fFound = clamp(fClearSum / 3.0, 0.0, 1.0);   // three clear columns are plenty
+    if (fClearSum < 0.001) return vec4(0.0);
+    float fLumAvg = fLumSum / fClearSum;
+
+    vec4 cSum = vec4(0.0);
+    float fWeights = 0.0;
+    for (int i = 0; i < 8; i++)
+    {
+        vec2 uvTap = vec2((float(i) + 0.5) / 8.0, fY);
+        vec4 c = texture2D(texFBColor, uvTap);
+        float fW = MirageClearColumn(uvTap, fFar)
+                 * (1.0 - 0.95 * smoothstep(1.05, 1.25, MirageLum(c) / max(fLumAvg, 0.001)));
+        cSum += c * fW;
+        fWeights += fW;
+    }
+    return fWeights > 0.001 ? cSum / fWeights : vec4(0.0);
 }
 
 void main()
@@ -107,12 +214,15 @@ void main()
 
     vec2 vOffset = MiragePixels(MirageRipple(uv, t) * MIRAGE_PIXELS * fShimmer);
     vec2 uvRipple = uv + vOffset;
-    // Never pull a nearby object's pixels into the haze behind it.
-    if (GetDepth(uvRipple) < fNear) uvRipple = uv;
+    // Never pull a nearer object's pixels into the haze behind it. Past
+    // MIRAGE_NEAR that is anything much closer than this pixel; anything
+    // beyond fFar is far enough to always mix with.
+    float fMinDepth = max(fNear, min(fDepth * 0.5, fFar));
+    if (GetDepth(uvRipple) < fMinDepth) uvRipple = uv;
 
     vec4 cPlain = texture2D(texFBColor, uv);
     float fBlurPx = MIRAGE_BLUR_PIXELS * fBlur * fShimmer;
-    vec4 cMirage = MirageBlur(uvRipple, fBlurPx, fNear);
+    vec4 cMirage = MirageBlur(uvRipple, fBlurPx, fMinDepth);
 
     // Mirage water: far ground just below the horizon shows the sky above
     // it, mirrored and rippling, like a lake that is not there.
@@ -127,14 +237,26 @@ void main()
         vec2 uvMirror = vec2(uv.x, fMirrorY) + vOffset * 2.5;
         if (uvMirror.y < 1.0)
         {
-            float fMirrorDepth = GetDepth(uvMirror);
-            float fReflects = max(MirageIsSky(fMirrorDepth), smoothstep(fFar, fFar * 2.0, fMirrorDepth));
-            fPool = fWater * fStrength * fReflects
+            // Blurred more than the shimmer: the "water" is never sharp.
+            // Only far content is mirrored; see MirageMirrorBlur.
+            float fCoverage;
+            vec4 cSkyMirror = MirageMirrorBlur(uvMirror, MIRAGE_BLUR_PIXELS * (0.5 + fBlur), fFar, fCoverage);
+            fCoverage *= 1.0 - MirageNearAround(uvMirror, fFar);
+            float fFound;
+            vec4 cRowSky = MirageRowSky(uvMirror.y, fFar, fFound);
+            // Weapon glow and fire are sky to the depth buffer; catch them
+            // by being brighter than the sky at this height.
+            float fGlow = smoothstep(1.08, 1.3, MirageLum(cSkyMirror) / max(MirageLum(cRowSky), 0.001));
+            fCoverage *= 1.0 - fGlow * step(0.001, fFound);
+            // Where something near or a glow hides the mirrored spot, show
+            // the plain sky of this height instead; fade the water only
+            // where no clear sky is found at all.
+            cSkyMirror = mix(cRowSky, cSkyMirror, fCoverage);
+            fCoverage = mix(fFound, 1.0, fCoverage);
+            fPool = fWater * fStrength * fCoverage * fCoverage
                   * smoothstep(fNear, fFar, fDepth)
                   * (1.0 - smoothstep(0.0, radians(MIRAGE_BAND_DEG), fBelow));
             // The reflection is a little paler than the sky, like haze.
-            // Blurred more than the shimmer: the "water" is never sharp.
-            vec4 cSkyMirror = MirageBlur(uvMirror, MIRAGE_BLUR_PIXELS * (0.5 + fBlur), fNear);
             cMirage = mix(cMirage, mix(cSkyMirror, vec4(1.0), 0.15), fPool);
         }
     }
